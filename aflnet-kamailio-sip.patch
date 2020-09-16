@@ -1,0 +1,248 @@
+diff --git a/afl-fuzz.c b/afl-fuzz.c
+index 154a41e..8540073 100644
+--- a/afl-fuzz.c
++++ b/afl-fuzz.c
+@@ -369,6 +369,7 @@ u32 state_cycles = 0;
+ u32 messages_sent = 0;
+ EXP_ST u8 session_virgin_bits[MAP_SIZE];     /* Regions yet untouched while the SUT is still running */
+ EXP_ST u8 *cleanup_script; /* script to clean up the environment of the SUT -- make fuzzing more deterministic */
++u32 local_port;		/* TCP/UDP port number to use as source */
+ char **was_fuzzed_map = NULL; /* A 2D array keeping state-specific was_fuzzed information */
+ u32 fuzzed_map_states = 0;
+ u32 fuzzed_map_qentries = 0;
+@@ -1007,6 +1008,7 @@ int send_over_network()
+   int n;
+   u8 likely_buggy = 0;
+   struct sockaddr_in serv_addr;
++  struct sockaddr_in my_serv_addr;
+ 
+   //Clean up the server if needed
+   if (cleanup_script) system(cleanup_script);
+@@ -1045,6 +1047,17 @@ int send_over_network()
+   serv_addr.sin_port = htons(net_port);
+   serv_addr.sin_addr.s_addr = inet_addr(net_ip);
+ 
++  if(local_port > 0) {
++    my_serv_addr.sin_family = AF_INET; 
++    my_serv_addr.sin_addr.s_addr = INADDR_ANY; 
++    my_serv_addr.sin_port = htons(local_port); 
++      
++    my_serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); 
++    if (bind(sockfd, (struct sockaddr*) &my_serv_addr, sizeof(struct sockaddr_in)))  {
++        FATAL("Unable to bind socket on local source port"); 
++    }
++  }
++
+   if(connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+     //If it cannot connect to the server under test
+     //try it again as the server initial startup time is varied
+
+@@ -8750,7 +8769,7 @@ int main(int argc, char** argv) {
+   gettimeofday(&tv, &tz);
+   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
+ 
+-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:")) > 0)
++  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:l:")) > 0)
+ 
+     switch (opt) {
+ 
+@@ -8976,6 +8995,9 @@ int main(int argc, char** argv) {
+         } else if (!strcmp(optarg, "HTTP")) {
+           extract_requests = &extract_requests_http;
+           extract_response_codes = &extract_response_codes_http;
++        } else if (!strcmp(optarg, "SIP")) {
++          extract_requests = &extract_requests_sip;
++          extract_response_codes = &extract_response_codes_sip;
+         } else {
+           FATAL("%s protocol is not supported yet!", optarg);
+         }
+@@ -9018,6 +9040,13 @@ int main(int argc, char** argv) {
+         cleanup_script = optarg;
+         break;
+ 
++      case 'l': /* local port to connect from */
++
++        if (local_port) FATAL("Multiple -l options not supported");
++        local_port = atoi(optarg);
++	if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
++        break;
++
+       default:
+ 
+         usage(argv[0]);
+diff --git a/aflnet-replay.c b/aflnet-replay.c
+index c434cd6..e2965d8 100644
+--- a/aflnet-replay.c
++++ b/aflnet-replay.c
+@@ -45,6 +45,7 @@ int main(int argc, char* argv[])
+   else if (!strcmp(argv[2], "SSH")) extract_response_codes = &extract_response_codes_ssh;
+   else if (!strcmp(argv[2], "TLS")) extract_response_codes = &extract_response_codes_tls;
+   else if (!strcmp(argv[2], "HTTP")) extract_response_codes = &extract_response_codes_http;
++  else if (!strcmp(argv[2], "SIP")) extract_response_codes = &extract_response_codes_sip;
+   else {fprintf(stderr, "[AFLNet-replay] Protocol %s has not been supported yet!\n", argv[2]); exit(1);}
+ 
+   portno = atoi(argv[3]);
+diff --git a/aflnet.c b/aflnet.c
+index f62c30c..cb0a6fa 100644
+--- a/aflnet.c
++++ b/aflnet.c
+@@ -648,6 +648,83 @@ region_t* extract_requests_http(unsigned char* buf, unsigned int buf_size, unsig
+ }
+ 
+ 
++region_t* extract_requests_sip(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref)
++{
++   char *mem;
++  unsigned int byte_count = 0;
++  unsigned int mem_count = 0;
++  unsigned int mem_size = 1024;
++  unsigned int region_count = 0;
++  region_t *regions = NULL;
++  char terminator[2] = {0x0D, 0x0A};
++
++  mem=(char *)ck_alloc(mem_size);
++
++  unsigned int cur_start = 0;
++  unsigned int cur_end = 0;
++  while (byte_count < buf_size) {
++
++    memcpy(&mem[mem_count], buf + byte_count++, 1);
++
++    //Check if the last bytes match the terminator, and the next ones are a SIP command
++    if ((mem_count > 1) && (memcmp(&mem[mem_count - 1], terminator, 1) == 0) &&
++	(((buf_size - byte_count >= 8) && (memcmp(buf + byte_count, "REGISTER", 8)==0) ) || 
++	((buf_size - byte_count >= 6) && (memcmp(buf + byte_count, "INVITE", 6)==0) ) || 
++	((buf_size - byte_count >= 3) && (memcmp(buf + byte_count, "ACK", 3)==0) ) || 
++	((buf_size - byte_count >= 3) && (memcmp(buf + byte_count, "BYE", 3)==0) ) )
++	) {
++      region_count++;
++      regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
++      regions[region_count - 1].start_byte = cur_start;
++      regions[region_count - 1].end_byte = cur_end;
++      regions[region_count - 1].state_sequence = NULL;
++      regions[region_count - 1].state_count = 0;
++
++      mem_count = 0;
++      cur_start = cur_end + 1;
++      cur_end = cur_start;
++    } else {
++      mem_count++;
++      cur_end++;
++
++      //Check if the last byte has been reached
++      if (cur_end == buf_size - 1) {
++        region_count++;
++        regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
++        regions[region_count - 1].start_byte = cur_start;
++        regions[region_count - 1].end_byte = cur_end;
++        regions[region_count - 1].state_sequence = NULL;
++        regions[region_count - 1].state_count = 0;
++        break;
++      }
++
++      if (mem_count == mem_size) {
++        //enlarge the mem buffer
++        mem_size = mem_size * 2;
++        mem=(char *)ck_realloc(mem, mem_size);
++      }
++    }
++  }
++  if (mem) ck_free(mem);
++
++  //in case region_count equals zero, it means that the structure of the buffer is broken
++  //hence we create one region for the whole buffer
++  if ((region_count == 0) && (buf_size > 0)) {
++    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
++    regions[0].start_byte = 0;
++    regions[0].end_byte = buf_size - 1;
++    regions[0].state_sequence = NULL;
++    regions[0].state_count = 0;
++
++    region_count = 1;
++  }
++
++  *region_count_ref = region_count;
++  return regions;
++}
+ 
+ 
+ unsigned int* extract_response_codes_smtp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref)
+@@ -1234,6 +1311,59 @@ unsigned int* extract_response_codes_http(unsigned char* buf, unsigned int buf_s
+   return state_sequence;
+ }
+ 
++unsigned int* extract_response_codes_sip(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref)
++{
++  char *mem;
++  unsigned int byte_count = 0;
++  unsigned int mem_count = 0;
++  unsigned int mem_size = 1024;
++  unsigned int *state_sequence = NULL;
++  unsigned int state_count = 0;
++  char terminator[2] = {0x0D, 0x0A};
++  char sip[4] = {0x53, 0x49, 0x50, 0x2f};
++
++  mem=(char *)ck_alloc(mem_size);
++
++  state_count++;
++  state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
++  state_sequence[state_count - 1] = 0;
++
++  while (byte_count < buf_size) {
++    memcpy(&mem[mem_count], buf + byte_count++, 1);
++
++    //Check if the last two bytes are 0x0D0A
++    if ((mem_count > 0) && (memcmp(&mem[mem_count - 1], terminator, 2) == 0)) {
++      if ((mem_count >= 4) && (memcmp(mem, sip, 4) == 0)) {
++        //Extract the response code which is the first 3 bytes
++        char temp[4];
++        memcpy(temp, &mem[8], 4);
++        temp[3] = 0x0;
++        unsigned int message_code = (unsigned int) atoi(temp);
++
++        if (message_code == 0) break;
++
++        state_count++;
++        state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
++        state_sequence[state_count - 1] = message_code;
++        mem_count = 0;
++      } else {
++        mem_count = 0;
++      }
++    } else {
++      mem_count++;
++      if (mem_count == mem_size) {
++        //enlarge the mem buffer
++        mem_size = mem_size * 2;
++        mem=(char *)ck_realloc(mem, mem_size);
++      }
++    }
++  }
++  if (mem) ck_free(mem);
++  *state_count_ref = state_count;
++  return state_sequence;
++}
++
+ // kl_messages manipulating functions
+ 
+ klist_t(lms) *construct_kl_messages(u8* fname, region_t *regions, u32 region_count)
+diff --git a/aflnet.h b/aflnet.h
+index 2e488af..eb917cb 100644
+--- a/aflnet.h
++++ b/aflnet.h
+@@ -67,6 +67,7 @@ unsigned int* extract_response_codes_ftp(unsigned char* buf, unsigned int buf_si
+ unsigned int* extract_response_codes_rtsp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
+ unsigned int* extract_response_codes_dtls12(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
+ unsigned int* extract_response_codes_http(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
++unsigned int* extract_response_codes_sip(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
+ extern unsigned int* (*extract_response_codes)(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
+ 
+ region_t* extract_requests_smtp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
+@@ -78,6 +79,7 @@ region_t* extract_requests_ftp(unsigned char* buf, unsigned int buf_size, unsign
+ region_t* extract_requests_rtsp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
+ region_t* extract_requests_dtls12(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
+ region_t* extract_requests_http(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
++region_t* extract_requests_sip(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
+ extern region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
+ 
+ // Network communication functions
