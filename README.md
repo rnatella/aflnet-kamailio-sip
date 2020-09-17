@@ -20,7 +20,7 @@ make
 ```
 
 
-To fuzz the SIP server, we will be simulating two SIP users that make a call (`REGISTER + INVITE`, adapted from this [tutorial](https://tomeko.net/other/sipp/sipp_cheatsheet.php)). One of the users will be the fuzzer; the other user will be a SIP client ([PJSIP](https://www.pjsip.org/)).
+To fuzz the SIP server, we will be simulating two SIP users that make a call (`REGISTER + INVITE`, adapted from this [tutorial](https://tomeko.net/other/sipp/sipp_cheatsheet.php)). One of the users will be the fuzzer (the caller); the other user will be impersonated by the [PJSIP](https://www.pjsip.org/) SIP client (the callee).
 
 ![SIP scenario](/sipp_pjsua.png)
 
@@ -38,7 +38,6 @@ patch -p1 < $WORKDIR/kamailio.patch
 
 make cfg
 make all
-make install
 ```
 
 
@@ -103,7 +102,7 @@ Finally, to run the SIPp client:
 ```
 cd $WORKDIR/sipp
 
-sipp 127.0.0.1 -sf $WORKDIR/sipp_scenario/REGISTER_INVITE_client2.xml -inf $WORKDIR/sipp_scenario/REGISTER_INVITE_client.csv -m 1 -l 1 -r 1 -rp 1000
+./sipp 127.0.0.1 -sf $WORKDIR/sipp_scenario/REGISTER_INVITE_client2.xml -inf $WORKDIR/sipp_scenario/REGISTER_INVITE_client.csv -m 1 -l 1 -r 1 -rp 1000
 ```
 
 
@@ -126,7 +125,15 @@ The output of SIp should appear as follows:
 
 
 
-To fuzz the server, we will launch both the SIP server, and the PJSIP client, using the `-c` option of AFLNet to launch our `pjsip.sh` script before communicating with the server. 
+To fuzz the server, we build it again with AFL:
+
+```
+cd $WORKDIR/kamailio
+
+CC=/home/rnatella/aflnet/afl-clang-fast make all
+```
+
+We launch both the SIP server and the PJSIP client, using the `-c` option of AFLNet to launch our `pjsip.sh` script before communicating with the server.
 
 ```
 cd $WORKDIR
