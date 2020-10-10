@@ -130,6 +130,7 @@ To fuzz the server, we build it again with AFL:
 ```
 cd $WORKDIR/kamailio
 
+CC=/home/rnatella/aflnet/afl-clang-fast make cfg
 CC=/home/rnatella/aflnet/afl-clang-fast make all
 ```
 
